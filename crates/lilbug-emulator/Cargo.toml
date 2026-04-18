@@ -1,0 +1,17 @@
+[package]
+name = "lilbug-emulator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+clap.workspace = true
+font8x8.workspace = true
+lilbug-core = { path = "../lilbug-core" }
+minifb.workspace = true
+png.workspace = true
+rcgen.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
