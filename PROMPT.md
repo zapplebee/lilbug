@@ -79,7 +79,7 @@ Also note:
   - `POST /v1/cmd`
   - `GET /v1/frame.png`
 - all non-bootstrap routes require Bearer auth
-- `/v1/init` only exists in bootstrap/unprovisioned mode
+- `/v1/init` is bootstrap-only and should fully reset/reprovision the emulator or device when called in bootstrap mode
 - core device config should be treated as persistent across restarts conceptually, and emulator work should move toward that where ADRs support it
 
 ## Main objective
@@ -125,6 +125,7 @@ If current code conflicts with the ADRs, update it to match the ADRs.
 Build or update `lilbug-cli` so it can at minimum:
 
 - initialize a new emulator/device through the bootstrap path
+- treat `init` in bootstrap mode as a full reset/reprovision operation, replacing prior persisted config and auth material for that target
 - store local device records in `~/.config/lilbug.json`
 - target a known device by nickname
 - call `GET /v1/state`
@@ -142,6 +143,7 @@ Build or update the emulator so it can at minimum:
 
 - start in a bootstrap-oriented mode
 - start in a Wi-Fi / normal-operation mode
+- allow `POST /v1/init` in bootstrap mode to wipe and replace prior persisted emulator state cleanly
 - render the required display surface and debug indicators
 - expose the rev1 HTTPS API surface
 - enforce Bearer auth on non-bootstrap routes
@@ -182,21 +184,22 @@ The work is only done when all of the following are true, or when you hit a real
 4. There is a documented command to start the emulator in Wi-Fi mode.
 5. There is a documented command to run the CLI.
 6. The CLI can initialize a fresh emulator/device target in the defined bootstrap flow.
-7. The CLI can store and reuse device records from `~/.config/lilbug.json`.
-8. The CLI can get config and state from a provisioned target.
-9. The CLI can send rev1 commands like `fwd:300`, `back:300`, `stop`, `brake`, and `face:happy`.
-10. Every implemented CLI flow is actually exercised during verification, not just compiled.
-11. The verification evidence includes the real commands used for each CLI flow.
-12. The emulator visibly renders:
+7. Re-running `init` against a bootstrap-mode target fully resets and reprovisions it instead of failing because prior state exists.
+8. The CLI can store and reuse device records from `~/.config/lilbug.json`.
+9. The CLI can get config and state from a provisioned target.
+10. The CLI can send rev1 commands like `fwd:300`, `back:300`, `stop`, `brake`, and `face:happy`.
+11. Every implemented CLI flow is actually exercised during verification, not just compiled.
+12. The verification evidence includes the real commands used for each CLI flow.
+13. The emulator visibly renders:
    - the device-sized display area required by the ADRs
    - a circular visible display boundary
    - lower-left `[FORWARD]`
    - lower-right `[BACKWARD]`
    - dim inactive motion labels
-13. The emulator can return the current frame as PNG.
-14. There are automated tests for the shared command/config logic and as much API/auth/config handling as is practical.
-15. There is at least one repeatable documented end-to-end verification flow a human can run locally.
-16. README/docs reflect the actual implemented architecture.
+14. The emulator can return the current frame as PNG.
+15. There are automated tests for the shared command/config logic and as much API/auth/config handling as is practical.
+16. There is at least one repeatable documented end-to-end verification flow a human can run locally.
+17. README/docs reflect the actual implemented architecture.
 
 ## Exhaustion rule
 
@@ -226,6 +229,7 @@ At minimum, verify:
 - build passes
 - tests pass
 - CLI bootstrap flow works as far as practical locally
+- re-running `init` in bootstrap mode replaces prior persisted target state cleanly
 - CLI can talk to the emulator over the implemented HTTPS path
 - CLI can retrieve state/config and send commands
 - frame retrieval works and produces a real image artifact

@@ -62,13 +62,13 @@ The CLI should:
 
 - create the file if it does not exist
 - update or replace a device record when reprovisioning the same nickname intentionally
-- use nickname as the primary human-facing target selector
+- use `--nickname` as the primary human-facing target selector for commands that operate on a known target
 
 Examples:
 
-- `lilbug-cli state anthony`
-- `lilbug-cli cmd anthony fwd:300`
-- `lilbug-cli frame anthony --out frame.png`
+- `lilbug-cli state --nickname anthony`
+- `lilbug-cli cmd --nickname anthony fwd:300`
+- `lilbug-cli frame --nickname anthony --out frame.png`
 
 ## Consequences
 

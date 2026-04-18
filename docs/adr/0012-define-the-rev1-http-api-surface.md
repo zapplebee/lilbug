@@ -135,11 +135,11 @@ The CLI should map closely onto this surface.
 Examples:
 
 - `lilbug-cli init ...` -> `POST /v1/init`
-- `lilbug-cli state <target>` -> `GET /v1/state`
-- `lilbug-cli config get <target>` -> `GET /v1/config`
-- `lilbug-cli config set <target> ...` -> `POST /v1/config`
-- `lilbug-cli cmd <target> fwd:300` -> `POST /v1/cmd`
-- `lilbug-cli frame <target> --out frame.png` -> `GET /v1/frame.png`
+- `lilbug-cli state --nickname <target>` -> `GET /v1/state`
+- `lilbug-cli config get --nickname <target>` -> `GET /v1/config`
+- `lilbug-cli config set --nickname <target> ...` -> `POST /v1/config`
+- `lilbug-cli cmd --nickname <target> fwd:300` -> `POST /v1/cmd`
+- `lilbug-cli frame --nickname <target> --out frame.png` -> `GET /v1/frame.png`
 
 ## Non-Goals
 

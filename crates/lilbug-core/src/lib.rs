@@ -368,6 +368,19 @@ impl CliConfig {
         self.devices.insert(nickname, device);
     }
 
+    pub fn rename_device(&mut self, old_nickname: &str, new_nickname: String) -> Result<(), String> {
+        if old_nickname == new_nickname {
+            return Ok(());
+        }
+
+        let device = self
+            .devices
+            .remove(old_nickname)
+            .ok_or_else(|| format!("unknown device nickname '{old_nickname}'"))?;
+        self.devices.insert(new_nickname, device);
+        Ok(())
+    }
+
     pub fn get_device(&self, nickname: &str) -> Result<&KnownDevice, String> {
         self.devices
             .get(nickname)
@@ -444,5 +457,24 @@ mod tests {
         config.save(&path).unwrap();
         let loaded = CliConfig::load(&path).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn rename_device_moves_record_to_new_nickname() {
+        let mut config = CliConfig::default();
+        config.insert_device(
+            "anthony".to_string(),
+            KnownDevice {
+                base_url: DEFAULT_WIFI_URL.to_string(),
+                api_key: "lb_test".to_string(),
+                cert_fingerprint: "SHA256:ABC123".to_string(),
+                cert_pem: Some("pem".to_string()),
+            },
+        );
+
+        config.rename_device("anthony", "bug-02".to_string()).unwrap();
+
+        assert!(config.get_device("anthony").is_err());
+        assert_eq!(config.get_device("bug-02").unwrap().api_key, "lb_test");
     }
 }

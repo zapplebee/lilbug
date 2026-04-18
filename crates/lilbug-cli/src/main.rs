@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use lilbug_core::{
-    ApiError, CliConfig, CommandRequest, ConfigPatchRequest, DEFAULT_BOOTSTRAP_URL, InitRequest,
-    KnownDevice, parse_command_token, sha256_fingerprint,
+    ApiError, CliConfig, CommandRequest, ConfigPatchRequest, DEFAULT_BOOTSTRAP_URL, DeviceConfig,
+    InitRequest, KnownDevice, parse_command_token, sha256_fingerprint,
 };
 use reqwest::{Certificate, Client, Method};
 
@@ -22,6 +22,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Init {
+        #[arg(long)]
         nickname: String,
         #[arg(long, default_value = DEFAULT_BOOTSTRAP_URL)]
         bootstrap_url: String,
@@ -33,6 +34,7 @@ enum Commands {
         api_key: Option<String>,
     },
     State {
+        #[arg(long)]
         nickname: String,
     },
     Config {
@@ -40,10 +42,12 @@ enum Commands {
         command: ConfigCommand,
     },
     Cmd {
+        #[arg(long)]
         nickname: String,
         token: String,
     },
     Frame {
+        #[arg(long)]
         nickname: String,
         #[arg(long)]
         out: PathBuf,
@@ -53,9 +57,11 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum ConfigCommand {
     Get {
+        #[arg(long)]
         nickname: String,
     },
     Set {
+        #[arg(long)]
         nickname: String,
         field: String,
         value: String,
@@ -131,10 +137,24 @@ async fn main() -> Result<()> {
                 field,
                 value,
             } => {
-                let device = load_known_device(&config_path, &nickname)?;
+                let mut cli_config = CliConfig::load(&config_path).map_err(anyhow::Error::msg)?;
+                let device = cli_config
+                    .get_device(&nickname)
+                    .map_err(anyhow::Error::msg)?
+                    .clone();
                 let patch = patch_from_cli(&field, value)?;
-                let config: serde_json::Value =
+                let config: DeviceConfig =
                     send_json(Method::POST, &device, "/v1/config", Some(&patch)).await?;
+
+                if field == "nickname" {
+                    // The local config file is keyed by nickname, so a successful remote rename
+                    // must move the stored trust record to the new nickname as well.
+                    cli_config
+                        .rename_device(&nickname, config.nickname.clone())
+                        .map_err(anyhow::Error::msg)?;
+                    cli_config.save(&config_path).map_err(anyhow::Error::msg)?;
+                }
+
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&config)

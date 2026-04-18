@@ -91,7 +91,8 @@ Initialize a fresh bootstrap target and store a record in `~/.config/lilbug.json
 
 ```bash
 cargo run -p lilbug-cli --bin lilbug -- \
-  init anthony \
+  init \
+  --nickname anthony \
   --bootstrap-url https://localhost:7443 \
   --wifi-ssid lab-net \
   --wifi-password secretpass
@@ -100,37 +101,39 @@ cargo run -p lilbug-cli --bin lilbug -- \
 Read state and config from a provisioned target:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- state anthony
-cargo run -p lilbug-cli --bin lilbug -- config get anthony
+cargo run -p lilbug-cli --bin lilbug -- state --nickname anthony
+cargo run -p lilbug-cli --bin lilbug -- config get --nickname anthony
 ```
 
 Mutate config over HTTPS:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- config set anthony nickname bug-02
-cargo run -p lilbug-cli --bin lilbug -- config set anthony wifi.ssid lab-net-2
+cargo run -p lilbug-cli --bin lilbug -- config set --nickname anthony nickname bug-02
+cargo run -p lilbug-cli --bin lilbug -- config set --nickname anthony wifi.ssid lab-net-2
 ```
+
+When a nickname change succeeds, the CLI also renames the matching local record in `~/.config/lilbug.json`, so later commands should use the new nickname.
 
 Send rev1 commands:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- cmd anthony fwd:300
-cargo run -p lilbug-cli --bin lilbug -- cmd anthony back:300
-cargo run -p lilbug-cli --bin lilbug -- cmd anthony stop
-cargo run -p lilbug-cli --bin lilbug -- cmd anthony brake
-cargo run -p lilbug-cli --bin lilbug -- cmd anthony face:happy
+cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony fwd:300
+cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony back:300
+cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony stop
+cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony brake
+cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony face:happy
 ```
 
 Retrieve the current frame as PNG:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- frame anthony --out /tmp/lilbug-frame.png
+cargo run -p lilbug-cli --bin lilbug -- frame --nickname anthony --out /tmp/lilbug-frame.png
 ```
 
 Override the local config path during verification:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state anthony
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname anthony
 ```
 
 ## Local CLI Config

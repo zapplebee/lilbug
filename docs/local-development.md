@@ -47,7 +47,8 @@ cargo run -p lilbug-emulator -- \
 ```bash
 cargo run -p lilbug-cli --bin lilbug -- \
   --config-path /tmp/lilbug.json \
-  init anthony \
+  init \
+  --nickname anthony \
   --bootstrap-url https://localhost:7443 \
   --wifi-ssid lab-net \
   --wifi-password secretpass
@@ -75,35 +76,37 @@ This proves persisted config survives the bootstrap-to-Wi-Fi restart.
 Get state:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state anthony
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname anthony
 ```
 
 Get config:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config get anthony
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config get --nickname anthony
 ```
 
 Set config:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config set anthony nickname bug-02
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config set --nickname anthony nickname bug-02
 ```
+
+This also renames the local CLI record key from `anthony` to `bug-02`.
 
 Send commands:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd anthony fwd:300
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd anthony back:300
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd anthony stop
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd anthony brake
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd anthony face:happy
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony fwd:300
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony back:300
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony stop
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony brake
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony face:happy
 ```
 
 Retrieve frame:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json frame anthony --out /tmp/lilbug-frame.png
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json frame --nickname anthony --out /tmp/lilbug-frame.png
 file /tmp/lilbug-frame.png
 ```
 
@@ -114,8 +117,8 @@ Expected result:
 
 ### 6. Verify persistence after config mutation
 
-After `config set anthony nickname bug-02`, restart Wi-Fi mode again and re-run `state anthony`.
-The returned config should still show `nickname: bug-02`.
+After `config set --nickname anthony nickname bug-02`, restart Wi-Fi mode again and re-run `state --nickname bug-02`.
+The returned config should still show `nickname: bug-02`, and the old nickname should no longer be the local lookup key.
 
 ## Manual Visual Checklist
 
