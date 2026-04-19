@@ -21,7 +21,14 @@ The following is the exact flow used to verify the current implementation locall
 ```bash
 cargo build
 cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The repo also includes Rust-native git hook support via `rusty-hook`:
+
+- `rust-toolchain.toml` requests `clippy` and `rustfmt`
+- `.rusty-hook.toml` configures `pre-commit` to run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`
+- running `cargo test` after cloning is enough to build the hook dependency and initialize the local hook scripts
 
 ### 2. Start the emulator in bootstrap mode
 

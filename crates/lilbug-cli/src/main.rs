@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -218,7 +219,7 @@ async fn bootstrap_init(url: &str, request: InitRequest) -> Result<lilbug_core::
         .context("failed to decode init response")
 }
 
-fn load_known_device(config_path: &PathBuf, nickname: &str) -> Result<KnownDevice> {
+fn load_known_device(config_path: &Path, nickname: &str) -> Result<KnownDevice> {
     let config = CliConfig::load(config_path).map_err(anyhow::Error::msg)?;
     let device = config
         .get_device(nickname)

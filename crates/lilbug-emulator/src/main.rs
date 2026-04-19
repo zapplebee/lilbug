@@ -214,7 +214,9 @@ fn main() -> Result<()> {
     match startup_rx.recv() {
         Ok(result) => result?,
         Err(err) => {
-            return Err(anyhow!("failed to receive emulator server startup status: {err}"));
+            return Err(anyhow!(
+                "failed to receive emulator server startup status: {err}"
+            ));
         }
     }
 
@@ -244,7 +246,12 @@ async fn run_runtime_tick(state: AppState) -> Result<()> {
     }
 }
 
-async fn run_server(addr: SocketAddr, tls: RustlsConfig, handle: Handle, state: AppState) -> Result<()> {
+async fn run_server(
+    addr: SocketAddr,
+    tls: RustlsConfig,
+    handle: Handle,
+    state: AppState,
+) -> Result<()> {
     let app = Router::new()
         .route("/v1/init", post(init_device))
         .route("/v1/state", get(get_state))

@@ -11,4 +11,5 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+rusty-hook = "0.11.2"
 tempfile.workspace = true

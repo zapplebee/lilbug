@@ -200,7 +200,14 @@ Build and tests:
 ```bash
 cargo build
 cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+Rust toolchain expectations:
+
+- `rust-toolchain.toml` requires `clippy` and `rustfmt`
+- `.rusty-hook.toml` configures a Rust-native `pre-commit` hook via `rusty-hook`
+- after pulling dependencies once, running `cargo test` will build the hook tooling and enable the local git hook workflow
 
 For a full repeatable bootstrap-to-Wi-Fi verification flow, including the exact CLI commands used to exercise each route, see `docs/local-development.md`.
 
