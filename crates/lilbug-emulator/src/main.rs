@@ -15,9 +15,9 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use lilbug_core::{
-    ApiError, CommandRequest, ConfigPatchRequest, DEFAULT_WIFI_URL, DISPLAY_SIZE, DeviceState,
-    FaceExpression, InitRequest, InitResponse, MotorDirection, PersistedDeviceState, RenderMode,
-    StartupMode, WINDOW_HEIGHT, sha256_fingerprint,
+    ApiError, CommandRequest, ConfigPatchRequest, DISPLAY_SIZE, DeviceState, FaceExpression,
+    InitRequest, InitResponse, MotorDirection, PersistedDeviceState, RenderMode, StartupMode,
+    WINDOW_HEIGHT, sha256_fingerprint,
 };
 use minifb::{Key, Window, WindowOptions};
 use png::Encoder;
@@ -67,6 +67,7 @@ struct RuntimeState {
     persisted: Option<PersistedDeviceState>,
     storage_dir: PathBuf,
     base_url: String,
+    motion_deadline: Option<Instant>,
 }
 
 impl RuntimeState {
@@ -88,6 +89,42 @@ impl RuntimeState {
         }
 
         Ok(())
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        if let Some(deadline) = self.motion_deadline {
+            if now >= deadline {
+                self.motion_deadline = None;
+                self.device.motion.direction = MotorDirection::Stop;
+                self.device.active_motion_deadline_ms = None;
+            } else {
+                let remaining = deadline.saturating_duration_since(now).as_millis();
+                self.device.active_motion_deadline_ms =
+                    Some(remaining.min(u128::from(u64::MAX)) as u64);
+            }
+        } else {
+            self.device.active_motion_deadline_ms = None;
+        }
+    }
+
+    fn apply_command(&mut self, command: CommandRequest) -> Result<(), String> {
+        self.device.apply_command(command.clone())?;
+        self.motion_deadline = match command.command.as_str() {
+            "forward" | "backward" => command
+                .duration_ms
+                .map(|duration_ms| Instant::now() + Duration::from_millis(duration_ms)),
+            "stop" | "brake" => None,
+            "face" => self.motion_deadline,
+            _ => None,
+        };
+        self.tick();
+        Ok(())
+    }
+
+    fn snapshot(&mut self) -> DeviceState {
+        self.tick();
+        self.device.clone()
     }
 }
 
@@ -118,7 +155,7 @@ impl IntoResponse for ResponseError {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let certs = load_or_create_certs(&args.storage_dir)?;
+    let certs = load_or_create_certs(&args.storage_dir, &collect_certificate_subject_names(&args))?;
     let persisted = load_persisted_state(&args.storage_dir)?;
 
     if args.mode == StartupMode::Wifi && persisted.is_none() {
@@ -131,12 +168,13 @@ async fn main() -> Result<()> {
     let base_url = args
         .wifi_base_url
         .clone()
-        .unwrap_or_else(|| default_base_url(args.mode));
+        .unwrap_or_else(|| default_base_url(&args.https_addr));
     let runtime = Arc::new(Mutex::new(RuntimeState {
         device: DeviceState::from_persisted(args.mode, persisted.as_ref()),
         persisted,
         storage_dir: args.storage_dir.clone(),
         base_url,
+        motion_deadline: None,
     }));
     let app_state = AppState { runtime };
 
@@ -149,6 +187,7 @@ async fn main() -> Result<()> {
         .context("failed to build rustls config")?;
 
     let server = tokio::spawn(run_server(addr, tls, app_state.clone()));
+    let ticker = tokio::spawn(run_runtime_tick(app_state.clone()));
 
     let ui_result = if args.headless {
         run_headless(args.run_for_ms)
@@ -160,8 +199,20 @@ async fn main() -> Result<()> {
     };
 
     server.abort();
+    ticker.abort();
     let _ = server.await;
+    let _ = ticker.await;
     ui_result
+}
+
+async fn run_runtime_tick(state: AppState) -> Result<()> {
+    loop {
+        {
+            let mut runtime = state.runtime.lock().expect("state lock poisoned");
+            runtime.tick();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn run_server(addr: SocketAddr, tls: RustlsConfig, state: AppState) -> Result<()> {
@@ -193,14 +244,6 @@ async fn init_device(
         ));
     }
 
-    if runtime.device.provisioned {
-        return Err(ResponseError::new(
-            StatusCode::CONFLICT,
-            "already_provisioned",
-            "device is already provisioned",
-        ));
-    }
-
     if request.nickname.trim().is_empty() {
         return Err(ResponseError::new(
             StatusCode::BAD_REQUEST,
@@ -216,8 +259,13 @@ async fn init_device(
         ));
     }
 
-    let cert_pem = fs::read_to_string(cert_path(&runtime.storage_dir))
-        .map_err(|err| ResponseError::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", err.to_string()))?;
+    let cert_pem = fs::read_to_string(cert_path(&runtime.storage_dir)).map_err(|err| {
+        ResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io_error",
+            err.to_string(),
+        )
+    })?;
     let cert_fingerprint = sha256_fingerprint(cert_pem.as_bytes());
     let persisted = PersistedDeviceState {
         config: lilbug_core::DeviceConfig {
@@ -233,12 +281,18 @@ async fn init_device(
         cert_fingerprint: cert_fingerprint.clone(),
     };
     save_persisted_state(&runtime.storage_dir, &persisted).map_err(|err| {
-        ResponseError::new(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", err.to_string())
+        ResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "persist_failed",
+            err.to_string(),
+        )
     })?;
 
     runtime.persisted = Some(persisted.clone());
     runtime.device = DeviceState::from_persisted(StartupMode::Bootstrap, Some(&persisted));
+    runtime.motion_deadline = None;
     runtime.device.network_ready = false;
+    runtime.tick();
 
     Ok(Json(InitResponse {
         nickname: persisted.config.nickname.clone(),
@@ -253,19 +307,20 @@ async fn get_state(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeviceState>, ResponseError> {
-    let runtime = state.runtime.lock().expect("state lock poisoned");
+    let mut runtime = state.runtime.lock().expect("state lock poisoned");
     authorize(&runtime, &headers)?;
     runtime.require_wifi_ready()?;
-    Ok(Json(runtime.device.clone()))
+    Ok(Json(runtime.snapshot()))
 }
 
 async fn get_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<lilbug_core::DeviceConfig>, ResponseError> {
-    let runtime = state.runtime.lock().expect("state lock poisoned");
+    let mut runtime = state.runtime.lock().expect("state lock poisoned");
     authorize(&runtime, &headers)?;
     runtime.require_wifi_ready()?;
+    runtime.tick();
     Ok(Json(runtime.device.config.clone()))
 }
 
@@ -279,6 +334,7 @@ async fn update_config(
     runtime.require_wifi_ready()?;
 
     runtime.device.apply_config_patch(&patch);
+    runtime.tick();
     let updated_config = runtime.device.config.clone();
     let storage_dir = runtime.storage_dir.clone();
     let persisted = runtime.persisted.as_mut().ok_or_else(|| {
@@ -290,7 +346,11 @@ async fn update_config(
     })?;
     persisted.config = updated_config.clone();
     save_persisted_state(&storage_dir, persisted).map_err(|err| {
-        ResponseError::new(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed", err.to_string())
+        ResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "persist_failed",
+            err.to_string(),
+        )
     })?;
 
     Ok(Json(updated_config))
@@ -305,22 +365,27 @@ async fn run_command(
     authorize(&runtime, &headers)?;
     runtime.require_wifi_ready()?;
 
-    runtime.device.apply_command(command).map_err(|message| {
+    runtime.apply_command(command).map_err(|message| {
         ResponseError::new(StatusCode::BAD_REQUEST, "invalid_command", message)
     })?;
-    Ok(Json(runtime.device.clone()))
+    Ok(Json(runtime.snapshot()))
 }
 
 async fn get_frame(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ResponseError> {
-    let runtime = state.runtime.lock().expect("state lock poisoned");
+    let mut runtime = state.runtime.lock().expect("state lock poisoned");
     authorize(&runtime, &headers)?;
     runtime.require_wifi_ready()?;
 
-    let png = render_frame_png(&runtime.device).map_err(|err| {
-        ResponseError::new(StatusCode::INTERNAL_SERVER_ERROR, "frame_encode_failed", err)
+    let snapshot = runtime.snapshot();
+    let png = render_frame_png(&snapshot).map_err(|err| {
+        ResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "frame_encode_failed",
+            err,
+        )
     })?;
 
     Ok(([("content-type", "image/png")], png))
@@ -330,7 +395,13 @@ fn authorize(runtime: &RuntimeState, headers: &HeaderMap) -> Result<(), Response
     let expected = runtime
         .persisted
         .as_ref()
-        .ok_or_else(|| ResponseError::new(StatusCode::UNAUTHORIZED, "missing_token", "device is not provisioned"))?
+        .ok_or_else(|| {
+            ResponseError::new(
+                StatusCode::UNAUTHORIZED,
+                "missing_token",
+                "device is not provisioned",
+            )
+        })?
         .api_key
         .clone();
     let header = headers
@@ -360,8 +431,8 @@ fn load_persisted_state(storage_dir: &Path) -> Result<Option<PersistedDeviceStat
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let persisted = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(persisted))
@@ -371,7 +442,8 @@ fn save_persisted_state(storage_dir: &Path, persisted: &PersistedDeviceState) ->
     fs::create_dir_all(storage_dir)
         .with_context(|| format!("failed to create {}", storage_dir.display()))?;
     let path = persisted_path(storage_dir);
-    let body = serde_json::to_string_pretty(persisted).context("failed to encode persisted state")?;
+    let body =
+        serde_json::to_string_pretty(persisted).context("failed to encode persisted state")?;
     fs::write(&path, format!("{body}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
 }
@@ -381,7 +453,7 @@ struct GeneratedCerts {
     key_pem: String,
 }
 
-fn load_or_create_certs(storage_dir: &Path) -> Result<GeneratedCerts> {
+fn load_or_create_certs(storage_dir: &Path, subject_names: &[String]) -> Result<GeneratedCerts> {
     fs::create_dir_all(storage_dir)
         .with_context(|| format!("failed to create {}", storage_dir.display()))?;
 
@@ -396,9 +468,11 @@ fn load_or_create_certs(storage_dir: &Path) -> Result<GeneratedCerts> {
         });
     }
 
-    let cert = generate_simple_self_signed(vec!["localhost".to_string()])
+    let cert = generate_simple_self_signed(subject_names.to_vec())
         .context("failed to generate self-signed certificate")?;
-    let cert_pem = cert.serialize_pem().context("failed to serialize certificate pem")?;
+    let cert_pem = cert
+        .serialize_pem()
+        .context("failed to serialize certificate pem")?;
     let key_pem = cert.serialize_private_key_pem();
     fs::write(&cert_path, &cert_pem)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
@@ -420,10 +494,59 @@ fn key_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join("key.pem")
 }
 
-fn default_base_url(mode: StartupMode) -> String {
-    match mode {
-        StartupMode::Bootstrap => DEFAULT_WIFI_URL.to_string(),
-        StartupMode::Wifi => DEFAULT_WIFI_URL.to_string(),
+fn default_base_url(https_addr: &str) -> String {
+    let host = parse_host_from_socket_addr(https_addr)
+        .filter(|host| *host != "0.0.0.0" && *host != "::")
+        .unwrap_or("localhost");
+    format!("https://{host}:8443")
+}
+
+fn collect_certificate_subject_names(args: &Args) -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+
+    if let Some(host) = parse_host_from_socket_addr(&args.https_addr) {
+        push_unique(&mut names, host.to_string());
+    }
+    if let Some(base_url) = &args.wifi_base_url {
+        if let Some(host) = parse_host_from_base_url(base_url) {
+            push_unique(&mut names, host.to_string());
+        }
+    }
+
+    names
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn parse_host_from_base_url(base_url: &str) -> Option<&str> {
+    let after_scheme = base_url.split_once("://")?.1;
+    let authority = after_scheme.split('/').next()?;
+    if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .map(|value| value.trim_start_matches('['))
+    } else {
+        authority.split(':').next()
+    }
+}
+
+fn parse_host_from_socket_addr(value: &str) -> Option<&str> {
+    if value.starts_with('[') {
+        value
+            .split(']')
+            .next()
+            .map(|host| host.trim_start_matches('['))
+    } else {
+        value.rsplit_once(':').map(|(host, _)| host)
     }
 }
 
@@ -460,7 +583,11 @@ fn run_window(state: AppState, run_for_ms: Option<u64>) -> Result<()> {
             }
         }
 
-        let snapshot = state.runtime.lock().expect("state lock poisoned").device.clone();
+        let snapshot = state
+            .runtime
+            .lock()
+            .expect("state lock poisoned")
+            .snapshot();
         draw_scene(&mut buffer, &snapshot);
         window
             .update_with_buffer(&buffer, WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -502,7 +629,7 @@ fn draw_scene(buffer: &mut [u32], state: &DeviceState) {
     let center_x = (WINDOW_WIDTH / 2) as i32;
     let center_y = (DISPLAY_SIZE / 2) as i32;
     let radius = (DISPLAY_SIZE as i32 / 2) - 10;
-    let face_color = match state.face {
+    let face_color = match state.face.expression {
         FaceExpression::Happy => COLOR_FACE_HAPPY,
         FaceExpression::Blink => COLOR_FACE_BLINK,
         FaceExpression::Surprised => COLOR_FACE_SURPRISED,
@@ -527,22 +654,33 @@ fn draw_scene(buffer: &mut [u32], state: &DeviceState) {
         }
     }
 
-    draw_face_features(buffer, state.face);
+    draw_face_features(buffer, state.face.expression);
 
-    let forward_color = if state.motor == MotorDirection::Forward {
+    let forward_color = if state.motion.direction == MotorDirection::Forward {
         COLOR_TEXT_ACTIVE
     } else {
         COLOR_TEXT_DIM
     };
-    let backward_color = if state.motor == MotorDirection::Backward {
+    let backward_color = if state.motion.direction == MotorDirection::Backward {
         COLOR_TEXT_ACTIVE
     } else {
         COLOR_TEXT_DIM
     };
 
     draw_text(buffer, 12, 442, "[FORWARD]", forward_color, 2);
-    draw_text(buffer, 278, 442, "[BACKWARD]", backward_color, 2);
-    draw_text(buffer, 118, 425, &format!("face:{}", state.face.as_str()), COLOR_WHITE, 1);
+    draw_text(buffer, 236, 442, "[BACKWARD]", backward_color, 2);
+    draw_text(
+        buffer,
+        88,
+        425,
+        &format!(
+            "face:{} motion:{:?}",
+            state.face.expression.as_str(),
+            state.motion.direction
+        ),
+        COLOR_WHITE,
+        1,
+    );
 }
 
 fn draw_face_features(buffer: &mut [u32], face: FaceExpression) {
@@ -625,4 +763,103 @@ fn put_pixel(buffer: &mut [u32], x: i32, y: i32, color: u32) {
     }
     let index = y as usize * WINDOW_WIDTH + x as usize;
     buffer[index] = color;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime_state() -> RuntimeState {
+        let persisted = PersistedDeviceState {
+            config: lilbug_core::DeviceConfig {
+                nickname: "bug-02".to_string(),
+                wifi: lilbug_core::WifiConfig {
+                    ssid: "lab-net".to_string(),
+                    password: "secret".to_string(),
+                },
+                render_mode: RenderMode::Local,
+            },
+            api_key: "lb_test".to_string(),
+            cert_pem: "pem".to_string(),
+            cert_fingerprint: "SHA256:TEST".to_string(),
+        };
+
+        RuntimeState {
+            device: DeviceState::from_persisted(StartupMode::Wifi, Some(&persisted)),
+            persisted: Some(persisted),
+            storage_dir: PathBuf::from("/tmp/lilbug-test"),
+            base_url: "https://127.0.0.1:8443".to_string(),
+            motion_deadline: None,
+        }
+    }
+
+    #[test]
+    fn timed_motion_expires_to_stop() {
+        let mut runtime = runtime_state();
+
+        runtime
+            .apply_command(CommandRequest {
+                command: "forward".to_string(),
+                duration_ms: Some(5),
+                value: None,
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(10));
+        runtime.tick();
+
+        assert_eq!(runtime.device.motion.direction, MotorDirection::Stop);
+        assert_eq!(runtime.device.active_motion_deadline_ms, None);
+    }
+
+    #[test]
+    fn face_command_preserves_existing_motion_deadline() {
+        let mut runtime = runtime_state();
+
+        runtime
+            .apply_command(CommandRequest {
+                command: "forward".to_string(),
+                duration_ms: Some(100),
+                value: None,
+            })
+            .unwrap();
+        let first_deadline = runtime.motion_deadline;
+
+        runtime
+            .apply_command(CommandRequest {
+                command: "face".to_string(),
+                duration_ms: None,
+                value: Some("happy".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(runtime.device.motion.direction, MotorDirection::Forward);
+        assert_eq!(runtime.device.face.expression, FaceExpression::Happy);
+        assert_eq!(runtime.motion_deadline, first_deadline);
+    }
+
+    #[test]
+    fn authorize_accepts_matching_bearer_token() {
+        let runtime = runtime_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer lb_test".parse().unwrap(),
+        );
+
+        assert!(authorize(&runtime, &headers).is_ok());
+    }
+
+    #[test]
+    fn authorize_rejects_invalid_bearer_token() {
+        let runtime = runtime_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer wrong".parse().unwrap(),
+        );
+
+        let error = authorize(&runtime, &headers).unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.body.code, "invalid_token");
+    }
 }

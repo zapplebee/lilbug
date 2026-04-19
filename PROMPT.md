@@ -50,6 +50,7 @@ Read and follow all relevant ADRs before making changes, especially:
 - `docs/adr/0012-define-the-rev1-http-api-surface.md`
 - `docs/adr/0013-define-rev1-command-grammar.md`
 - `docs/adr/0014-define-the-local-cli-config-file.md`
+- `docs/adr/0015-separate-motion-and-face-command-lanes.md`
 
 Also note:
 
@@ -71,6 +72,10 @@ Also note:
 - emulator must show a visible circular display boundary
 - emulator must show `[FORWARD]` lower-left and `[BACKWARD]` lower-right, always visible and dimmed when inactive
 - rev1 command grammar includes forms like `fwd:300`, `back:300`, `stop`, `brake`, `face:happy`
+- motion and face are separate command lanes
+- timed motion commands must auto-expire after their duration unless replaced by a newer motion command
+- motion commands interrupt only motion
+- face commands interrupt only face
 - rev1 HTTP API surface is:
   - `POST /v1/init`
   - `GET /v1/state`
@@ -81,6 +86,35 @@ Also note:
 - all non-bootstrap routes require Bearer auth
 - `/v1/init` is bootstrap-only and should fully reset/reprovision the emulator or device when called in bootstrap mode
 - core device config should be treated as persistent across restarts conceptually, and emulator work should move toward that where ADRs support it
+
+## Known drift to fix
+
+The current repo already contains some implementation work, but there is still significant drift between the ADRs and the code.
+
+Treat the following as high-priority correction work for this run:
+
+1. `init` reset semantics
+   - `init` in bootstrap mode should fully reset and reprovision the emulator/device instead of failing because prior state exists.
+
+2. Timed motion semantics
+   - `fwd:<duration_ms>` and `back:<duration_ms>` must actually run for the requested time and then stop automatically.
+   - a newer motion command must cancel the previously scheduled motion expiry.
+
+3. Separate motion and face lanes
+   - face commands must not interrupt motion commands.
+   - motion commands must not interrupt face commands.
+   - move away from an implicit single-command model if needed.
+
+4. HTTPS identity for Wi-Fi targets
+   - do not leave the implementation effectively limited to `localhost`.
+   - the trust/certificate story should support the intended HTTPS-over-Wi-Fi direction rather than only a localhost emulator loop.
+
+5. Emulator UI correctness
+   - the `[BACKWARD]` indicator must be fully visible on screen.
+   - do not leave documented emulator UI elements clipped or partially off-screen.
+
+6. Verification drift
+   - verification should cover the real user-facing flows implied by the ADRs, including timed motion behavior, reset/reprovision behavior, and the CLI flows.
 
 ## Main objective
 
@@ -109,13 +143,14 @@ Implement as many of these as possible, in order, without leaving ADR scope:
 Work in this order unless you hit a blocker:
 
 1. Replace any old MQTT- or local-IPC-centered emulator/CLI path with the ADR-defined HTTPS path
-2. Implement the rev1 HTTP API surface in the emulator
-3. Implement CLI target lookup and token/cert trust using `~/.config/lilbug.json`
-4. Implement `init`, `state`, `config get`, `config set`, `cmd`, and `frame` CLI flows
-5. Implement emulator startup modes for bootstrap and Wi-Fi flows
-6. Implement frame PNG retrieval
-7. Improve tests and verification
-8. Fix defects, rough edges, and documentation gaps
+2. Correct the known ADR drift listed above before treating the implementation as complete
+3. Implement the rev1 HTTP API surface in the emulator
+4. Implement CLI target lookup and token/cert trust using `~/.config/lilbug.json`
+5. Implement `init`, `state`, `config get`, `config set`, `cmd`, and `frame` CLI flows
+6. Implement emulator startup modes for bootstrap and Wi-Fi flows
+7. Implement frame PNG retrieval
+8. Improve tests and verification
+9. Fix defects, rough edges, and documentation gaps
 
 Do not preserve outdated architecture just because it already exists in the repo.
 If current code conflicts with the ADRs, update it to match the ADRs.
@@ -137,6 +172,8 @@ Build or update `lilbug-cli` so it can at minimum:
 
 The CLI should follow the ADR-defined command grammar and the ADR-defined local config shape.
 
+The CLI verification and docs should reflect the independent motion/face command semantics and the reset/reprovision behavior.
+
 ## Emulator scope
 
 Build or update the emulator so it can at minimum:
@@ -149,6 +186,8 @@ Build or update the emulator so it can at minimum:
 - enforce Bearer auth on non-bootstrap routes
 - return the current frame as PNG
 - apply config and command changes through the HTTP API
+- implement independent motion and face command lanes
+- implement timed motion expiry and replacement behavior
 - support inspection and control flows that a human or automation can run locally
 
 The emulator is the test stand-in for the device. Keep it practical and scriptable.
@@ -163,6 +202,8 @@ Use these defaults unless the codebase strongly suggests a better option that st
 - a lightweight Rust HTTP server/client stack
 - a lightweight native rendering/window crate suitable for a fixed-size emulator window
 - straightforward integration tests for parsing, auth, config handling, and HTTP route behavior
+
+Prefer explicit state modeling over continuing to pile logic onto a single last-command field if that field no longer matches the ADRs.
 
 ## What not to build
 
@@ -188,18 +229,21 @@ The work is only done when all of the following are true, or when you hit a real
 8. The CLI can store and reuse device records from `~/.config/lilbug.json`.
 9. The CLI can get config and state from a provisioned target.
 10. The CLI can send rev1 commands like `fwd:300`, `back:300`, `stop`, `brake`, and `face:happy`.
-11. Every implemented CLI flow is actually exercised during verification, not just compiled.
-12. The verification evidence includes the real commands used for each CLI flow.
-13. The emulator visibly renders:
+11. Timed motion commands actually expire automatically after their duration unless replaced by a newer motion command.
+12. Motion and face commands behave as separate lanes and do not cancel each other.
+13. Every implemented CLI flow is actually exercised during verification, not just compiled.
+14. The verification evidence includes the real commands used for each CLI flow.
+15. The emulator visibly renders:
    - the device-sized display area required by the ADRs
    - a circular visible display boundary
    - lower-left `[FORWARD]`
    - lower-right `[BACKWARD]`
    - dim inactive motion labels
-14. The emulator can return the current frame as PNG.
-15. There are automated tests for the shared command/config logic and as much API/auth/config handling as is practical.
-16. There is at least one repeatable documented end-to-end verification flow a human can run locally.
-17. README/docs reflect the actual implemented architecture.
+16. The emulator can return the current frame as PNG.
+17. The HTTPS trust story and implementation are not effectively limited to `localhost` only.
+18. There are automated tests for the shared command/config logic and as much API/auth/config handling as is practical.
+19. There is at least one repeatable documented end-to-end verification flow a human can run locally.
+20. README/docs reflect the actual implemented architecture.
 
 ## Exhaustion rule
 
@@ -211,8 +255,8 @@ After the main flow works, continue spending the remaining session on, in this o
 2. improving API and CLI error handling
 3. improving tests
 4. improving bootstrap and restart verification
-5. tightening docs and examples
-6. removing obsolete code paths that conflict with the current ADRs
+5. removing obsolete code paths that conflict with the current ADRs
+6. tightening docs and examples
 7. polishing emulator layout issues and obvious UX defects that violate the defined requirements
 
 Only stop when:
@@ -232,6 +276,9 @@ At minimum, verify:
 - re-running `init` in bootstrap mode replaces prior persisted target state cleanly
 - CLI can talk to the emulator over the implemented HTTPS path
 - CLI can retrieve state/config and send commands
+- timed motion commands expire on their own
+- a newer motion command replaces the prior motion command cleanly
+- face commands do not cancel active motion
 - frame retrieval works and produces a real image artifact
 - emulator startup modes behave as documented
 
@@ -245,6 +292,13 @@ That includes, if implemented:
 - `config set`
 - `cmd` with representative motion and face commands
 - `frame`
+
+Use real command sequences that prove the lane semantics, such as:
+
+- a timed motion command that later returns to stop on its own
+- a timed motion command replaced by a newer motion command
+- a face command issued while motion is active without cancelling the motion
+- re-running `init` to prove reset/reprovision behavior
 
 Do not claim a CLI flow works unless you actually ran it successfully or clearly document the exact external blocker that prevented running it.
 
@@ -264,6 +318,8 @@ At minimum, update documentation for:
 - the local config file shape
 - the HTTP API surface
 - the command grammar
+- the motion/face lane semantics
+- the reset/reprovision behavior of `init`
 - what is implemented versus still planned
 
 If `README.md` no longer reflects reality, update it.

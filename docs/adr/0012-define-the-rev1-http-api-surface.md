@@ -32,7 +32,7 @@ The rev1 HTTP API surface is:
 
 All non-bootstrap routes should require Bearer token authentication.
 
-`/v1/init` is only available when the emulator or device is in bootstrap / unprovisioned state.
+`/v1/init` is only available when the emulator or device is in bootstrap mode.
 
 ## Rationale
 
@@ -56,13 +56,20 @@ Expected payload direction:
 
 - Wi-Fi credentials
 - nickname / device identity
-- HTTPS certificate or trust material
 - API key
+
+Expected response direction:
+
+- target base URL
+- API key
+- HTTPS certificate or certificate fingerprint for later trust pinning
 
 Behavior:
 
-- valid only in bootstrap mode or unprovisioned state
-- should reject requests once the device is already provisioned unless an explicit reprovisioning path is later defined
+- valid only in bootstrap mode
+- in bootstrap mode, it may fully reset and reprovision the target rather than rejecting a repeat init
+- for the emulator, bootstrap may use an insecure convenience path so the CLI can capture trust material for later HTTPS use
+- for real hardware, first-contact provisioning is expected to happen over USB
 
 ### `GET /v1/state`
 
@@ -117,7 +124,7 @@ All normal-operation routes require:
 Authorization: Bearer <api_key>
 ```
 
-`POST /v1/init` is the bootstrap exception and is only exposed in bootstrap / unprovisioned mode.
+`POST /v1/init` is the bootstrap exception and is only exposed in bootstrap mode.
 
 ## Response Direction
 

@@ -49,6 +49,12 @@ pub enum MotorDirection {
     Brake,
 }
 
+impl MotorDirection {
+    pub fn is_timed(self) -> bool {
+        matches!(self, Self::Forward | Self::Backward)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FaceExpression {
@@ -118,11 +124,37 @@ pub struct DeviceState {
     pub mode: StartupMode,
     pub provisioned: bool,
     pub config: DeviceConfig,
-    pub face: FaceExpression,
-    pub motor: MotorDirection,
+    pub face: FaceLaneState,
+    pub motion: MotionLaneState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_command: Option<CommandRequest>,
+    pub active_motion_deadline_ms: Option<u64>,
     pub network_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FaceLaneState {
+    pub expression: FaceExpression,
+}
+
+impl Default for FaceLaneState {
+    fn default() -> Self {
+        Self {
+            expression: FaceExpression::Neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MotionLaneState {
+    pub direction: MotorDirection,
+}
+
+impl Default for MotionLaneState {
+    fn default() -> Self {
+        Self {
+            direction: MotorDirection::Stop,
+        }
+    }
 }
 
 impl DeviceState {
@@ -132,18 +164,18 @@ impl DeviceState {
                 mode,
                 provisioned: true,
                 config: persisted.config.clone(),
-                face: FaceExpression::Neutral,
-                motor: MotorDirection::Stop,
-                last_command: None,
+                face: FaceLaneState::default(),
+                motion: MotionLaneState::default(),
+                active_motion_deadline_ms: None,
                 network_ready: mode == StartupMode::Wifi,
             },
             None => Self {
                 mode,
                 provisioned: false,
                 config: DeviceConfig::default(),
-                face: FaceExpression::Neutral,
-                motor: MotorDirection::Stop,
-                last_command: None,
+                face: FaceLaneState::default(),
+                motion: MotionLaneState::default(),
+                active_motion_deadline_ms: None,
                 network_ready: false,
             },
         }
@@ -167,19 +199,29 @@ impl DeviceState {
     pub fn apply_command(&mut self, command: CommandRequest) -> Result<(), String> {
         command.validate()?;
         match command.command.as_str() {
-            "forward" => self.motor = MotorDirection::Forward,
-            "backward" => self.motor = MotorDirection::Backward,
-            "stop" => self.motor = MotorDirection::Stop,
-            "brake" => self.motor = MotorDirection::Brake,
+            "forward" => self.motion.direction = MotorDirection::Forward,
+            "backward" => self.motion.direction = MotorDirection::Backward,
+            "stop" => self.motion.direction = MotorDirection::Stop,
+            "brake" => self.motion.direction = MotorDirection::Brake,
             "face" => {
                 let expression = FaceExpression::parse(
-                    command.value.as_deref().ok_or("face command requires a value")?,
+                    command
+                        .value
+                        .as_deref()
+                        .ok_or("face command requires a value")?,
                 )?;
-                self.face = expression;
+                self.face.expression = expression;
             }
             _ => return Err(format!("unsupported command '{}'", command.command)),
         }
-        self.last_command = Some(command);
+
+        self.active_motion_deadline_ms = match command.command.as_str() {
+            "forward" | "backward" => command.duration_ms,
+            "stop" | "brake" => None,
+            "face" => self.active_motion_deadline_ms,
+            _ => None,
+        };
+
         Ok(())
     }
 }
@@ -241,10 +283,7 @@ impl CommandRequest {
                 Ok(())
             }
             "face" => {
-                let value = self
-                    .value
-                    .as_deref()
-                    .ok_or("face command requires value")?;
+                let value = self.value.as_deref().ok_or("face command requires value")?;
                 if self.duration_ms.is_some() {
                     return Err("face command does not accept duration_ms".to_string());
                 }
@@ -368,7 +407,22 @@ impl CliConfig {
         self.devices.insert(nickname, device);
     }
 
-    pub fn rename_device(&mut self, old_nickname: &str, new_nickname: String) -> Result<(), String> {
+    pub fn upsert_device_for_target(&mut self, nickname: String, device: KnownDevice) {
+        // Reprovisioning the same target under a new nickname should replace the old local
+        // record instead of leaving stale aliases behind in lilbug.json.
+        self.devices.retain(|existing_nickname, existing_device| {
+            existing_nickname == &nickname
+                || existing_device.base_url != device.base_url
+                || existing_device.cert_fingerprint != device.cert_fingerprint
+        });
+        self.devices.insert(nickname, device);
+    }
+
+    pub fn rename_device(
+        &mut self,
+        old_nickname: &str,
+        new_nickname: String,
+    ) -> Result<(), String> {
         if old_nickname == new_nickname {
             return Ok(());
         }
@@ -440,6 +494,53 @@ mod tests {
     }
 
     #[test]
+    fn face_commands_do_not_cancel_motion_lane() {
+        let mut state = DeviceState::from_persisted(StartupMode::Wifi, None);
+
+        state
+            .apply_command(CommandRequest {
+                command: "forward".to_string(),
+                duration_ms: Some(300),
+                value: None,
+            })
+            .unwrap();
+        state
+            .apply_command(CommandRequest {
+                command: "face".to_string(),
+                duration_ms: None,
+                value: Some("happy".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(state.motion.direction, MotorDirection::Forward);
+        assert_eq!(state.face.expression, FaceExpression::Happy);
+        assert_eq!(state.active_motion_deadline_ms, Some(300));
+    }
+
+    #[test]
+    fn stop_clears_timed_motion_deadline() {
+        let mut state = DeviceState::from_persisted(StartupMode::Wifi, None);
+
+        state
+            .apply_command(CommandRequest {
+                command: "forward".to_string(),
+                duration_ms: Some(300),
+                value: None,
+            })
+            .unwrap();
+        state
+            .apply_command(CommandRequest {
+                command: "stop".to_string(),
+                duration_ms: None,
+                value: None,
+            })
+            .unwrap();
+
+        assert_eq!(state.motion.direction, MotorDirection::Stop);
+        assert_eq!(state.active_motion_deadline_ms, None);
+    }
+
+    #[test]
     fn cli_config_round_trip_preserves_known_devices() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("lilbug.json");
@@ -472,9 +573,40 @@ mod tests {
             },
         );
 
-        config.rename_device("anthony", "bug-02".to_string()).unwrap();
+        config
+            .rename_device("anthony", "bug-02".to_string())
+            .unwrap();
 
         assert!(config.get_device("anthony").is_err());
         assert_eq!(config.get_device("bug-02").unwrap().api_key, "lb_test");
+    }
+
+    #[test]
+    fn upsert_device_for_target_replaces_stale_nickname_alias() {
+        let mut config = CliConfig::default();
+        config.insert_device(
+            "anthony".to_string(),
+            KnownDevice {
+                base_url: DEFAULT_WIFI_URL.to_string(),
+                api_key: "lb_old".to_string(),
+                cert_fingerprint: "SHA256:ABC123".to_string(),
+                cert_pem: Some("pem-old".to_string()),
+            },
+        );
+
+        config.upsert_device_for_target(
+            "beatrice".to_string(),
+            KnownDevice {
+                base_url: DEFAULT_WIFI_URL.to_string(),
+                api_key: "lb_new".to_string(),
+                cert_fingerprint: "SHA256:ABC123".to_string(),
+                cert_pem: Some("pem-new".to_string()),
+            },
+        );
+
+        assert!(config.get_device("anthony").is_err());
+        let updated = config.get_device("beatrice").unwrap();
+        assert_eq!(updated.api_key, "lb_new");
+        assert_eq!(config.devices.len(), 1);
     }
 }

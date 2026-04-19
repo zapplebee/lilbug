@@ -28,6 +28,7 @@ lilbug/
   - bootstrap init requests and responses
   - config and state payloads
   - command grammar parsing for `fwd:<ms>`, `back:<ms>`, `stop`, `brake`, and `face:<expression>`
+  - separate motion and face lane state
   - JSON error responses
   - local CLI config records
 - emulator startup modes:
@@ -42,6 +43,7 @@ lilbug/
   - `GET /v1/frame.png`
 - Bearer-token auth on all non-bootstrap routes
 - emulator persistence for nickname, Wi-Fi config, API key, and certificate material across restarts
+- bootstrap-mode `init` reset/reprovision behavior that replaces prior persisted core state
 - CLI target lookup via `~/.config/lilbug.json`
 - PNG frame retrieval for debugging and multimodal tooling
 - native emulator rendering with:
@@ -58,7 +60,7 @@ Bootstrap mode:
 cargo run -p lilbug-emulator -- \
   --mode bootstrap \
   --https-addr 127.0.0.1:7443 \
-  --wifi-base-url https://localhost:8443
+  --wifi-base-url https://127.0.0.1:8443
 ```
 
 Wi-Fi mode:
@@ -93,10 +95,17 @@ Initialize a fresh bootstrap target and store a record in `~/.config/lilbug.json
 cargo run -p lilbug-cli --bin lilbug -- \
   init \
   --nickname anthony \
-  --bootstrap-url https://localhost:7443 \
+  --bootstrap-url https://127.0.0.1:7443 \
   --wifi-ssid lab-net \
   --wifi-password secretpass
 ```
+
+Re-running `init` against a bootstrap-mode target intentionally wipes and replaces the prior persisted config and API key for that target.
+
+For the emulator, this bootstrap step is allowed to use an insecure convenience path so the CLI can receive and pin the returned certificate for later HTTPS use.
+For real hardware, the equivalent first-contact provisioning flow is expected to happen over USB.
+
+If the same target is reprovisioned under a new nickname, the CLI replaces the old local record instead of keeping stale duplicate aliases for that target.
 
 Read state and config from a provisioned target:
 
@@ -109,7 +118,7 @@ Mutate config over HTTPS:
 
 ```bash
 cargo run -p lilbug-cli --bin lilbug -- config set --nickname anthony nickname bug-02
-cargo run -p lilbug-cli --bin lilbug -- config set --nickname anthony wifi.ssid lab-net-2
+cargo run -p lilbug-cli --bin lilbug -- config set --nickname bug-02 wifi.ssid lab-net-2
 ```
 
 When a nickname change succeeds, the CLI also renames the matching local record in `~/.config/lilbug.json`, so later commands should use the new nickname.
@@ -123,6 +132,15 @@ cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony stop
 cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony brake
 cargo run -p lilbug-cli --bin lilbug -- cmd --nickname anthony face:happy
 ```
+
+If you rename a target, use the new nickname for later commands.
+
+Command semantics follow ADR 0015:
+
+- motion and face are separate lanes
+- `face:happy` does not cancel active motion
+- `fwd:<ms>` and `back:<ms>` expire automatically unless replaced by a newer motion command
+- `stop` and `brake` affect only the motion lane
 
 Retrieve the current frame as PNG:
 
@@ -144,7 +162,7 @@ The rev1 minimum file shape is:
 {
   "devices": {
     "anthony": {
-      "base_url": "https://localhost:8443",
+      "base_url": "https://127.0.0.1:8443",
       "api_key": "lb_abcdef123456",
       "cert_fingerprint": "SHA256:..."
     }
@@ -153,6 +171,8 @@ The rev1 minimum file shape is:
 ```
 
 The current implementation also stores `cert_pem` so the CLI can trust the emulator's self-signed certificate directly while still recording the ADR-required fingerprint.
+
+For non-`localhost` Wi-Fi verification, the emulator certificate includes SANs derived from `--https-addr` and `--wifi-base-url` when the storage directory is first initialized.
 
 ## HTTP API
 

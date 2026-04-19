@@ -70,12 +70,17 @@ The CLI's local config should store at minimum:
 
 USB remains the first-contact and recovery path.
 
+For real hardware, first-contact provisioning is expected to happen over USB rather than over the normal Wi-Fi HTTPS interface.
+
+For the emulator, bootstrap may use an insecure convenience path during `init` so the CLI can capture and pin the target certificate for later HTTPS use.
+
 Provisioning installs at least:
 
 - Wi-Fi credentials
 - nickname
-- certificate or trust material
 - API key
+
+After bootstrap, the CLI stores the returned certificate or fingerprint as trust material for normal HTTPS interaction.
 
 Once provisioned, normal interaction moves to HTTPS over Wi-Fi.
 

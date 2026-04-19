@@ -10,7 +10,10 @@ use lilbug_core::{
 use reqwest::{Certificate, Client, Method};
 
 #[derive(Parser, Debug)]
-#[command(name = "lilbug", about = "CLI for the lilbug rev1 emulator and future device")]
+#[command(
+    name = "lilbug",
+    about = "CLI for the lilbug rev1 emulator and future device"
+)]
 struct Cli {
     #[arg(long)]
     config_path: Option<PathBuf>,
@@ -98,7 +101,7 @@ async fn main() -> Result<()> {
             .await?;
 
             verify_pem_fingerprint(&response.cert_pem, &response.cert_fingerprint)?;
-            config.insert_device(
+            config.upsert_device_for_target(
                 nickname,
                 KnownDevice {
                     base_url: response.base_url.clone(),
@@ -110,12 +113,14 @@ async fn main() -> Result<()> {
             config.save(&config_path).map_err(anyhow::Error::msg)?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&response).context("failed to render init response")?
+                serde_json::to_string_pretty(&response)
+                    .context("failed to render init response")?
             );
         }
         Commands::State { nickname } => {
             let device = load_known_device(&config_path, &nickname)?;
-            let state: serde_json::Value = send_json_no_body(Method::GET, &device, "/v1/state").await?;
+            let state: serde_json::Value =
+                send_json_no_body(Method::GET, &device, "/v1/state").await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&state).context("failed to render state")?
@@ -164,7 +169,8 @@ async fn main() -> Result<()> {
         },
         Commands::Cmd { nickname, token } => {
             let device = load_known_device(&config_path, &nickname)?;
-            let command: CommandRequest = parse_command_token(&token).map_err(anyhow::Error::msg)?;
+            let command: CommandRequest =
+                parse_command_token(&token).map_err(anyhow::Error::msg)?;
             let state: serde_json::Value =
                 send_json(Method::POST, &device, "/v1/cmd", Some(&command)).await?;
             println!(
@@ -242,9 +248,9 @@ fn patch_from_cli(field: &str, value: String) -> Result<ConfigPatchRequest> {
             render_mode: Some(match value.as_str() {
                 "local" => lilbug_core::RenderMode::Local,
                 "streamed_override" => lilbug_core::RenderMode::StreamedOverride,
-                other => bail!(
-                    "unsupported render_mode '{other}'; expected local or streamed_override"
-                ),
+                other => {
+                    bail!("unsupported render_mode '{other}'; expected local or streamed_override")
+                }
             }),
             ..ConfigPatchRequest::default()
         }),
@@ -273,9 +279,10 @@ where
     } else {
         request
     };
-    let response = request.send().await.with_context(|| {
-        format!("failed to call {}{}", device.base_url, route)
-    })?;
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to call {}{}", device.base_url, route))?;
 
     decode_json_response(response).await
 }
@@ -305,7 +312,11 @@ async fn send_bytes(device: &KnownDevice, route: &str) -> Result<Vec<u8>> {
         bail!(message);
     }
 
-    response.bytes().await.map(|bytes| bytes.to_vec()).context("failed to read binary response")
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .context("failed to read binary response")
 }
 
 async fn decode_json_response<T>(response: reqwest::Response) -> Result<T>
@@ -321,7 +332,10 @@ where
         bail!(message);
     }
 
-    response.json().await.context("failed to decode JSON response")
+    response
+        .json()
+        .await
+        .context("failed to decode JSON response")
 }
 
 fn client_for_device(device: &KnownDevice) -> Result<Client> {

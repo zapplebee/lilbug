@@ -9,6 +9,8 @@ The current local loop mirrors the accepted rev1 direction:
 - all non-bootstrap routes require Bearer auth
 - the CLI stores known targets in `~/.config/lilbug.json`
 - the emulator persists core config across restarts inside its storage directory
+- re-running `init` in bootstrap mode replaces the prior persisted config for that target
+- motion and face are independent command lanes
 
 ## Repeatable Verification Flow
 
@@ -27,7 +29,7 @@ cargo test
 cargo run -p lilbug-emulator -- \
   --mode bootstrap \
   --https-addr 127.0.0.1:7443 \
-  --wifi-base-url https://localhost:8443 \
+  --wifi-base-url https://127.0.0.1:8443 \
   --storage-dir /tmp/lilbug-state
 ```
 
@@ -37,7 +39,7 @@ For unattended verification:
 cargo run -p lilbug-emulator -- \
   --mode bootstrap \
   --https-addr 127.0.0.1:7443 \
-  --wifi-base-url https://localhost:8443 \
+  --wifi-base-url https://127.0.0.1:8443 \
   --storage-dir /tmp/lilbug-state \
   --headless
 ```
@@ -49,7 +51,7 @@ cargo run -p lilbug-cli --bin lilbug -- \
   --config-path /tmp/lilbug.json \
   init \
   --nickname anthony \
-  --bootstrap-url https://localhost:7443 \
+  --bootstrap-url https://127.0.0.1:7443 \
   --wifi-ssid lab-net \
   --wifi-password secretpass
 ```
@@ -59,6 +61,23 @@ This proves:
 - `POST /v1/init` works
 - the CLI can create and save a device record
 - the CLI stores API key and trust material for later Wi-Fi use
+
+In the emulator, this bootstrap path is intentionally a convenience flow, not the final hardware provisioning transport. The real hardware equivalent is expected to happen over USB.
+
+Re-run `init` with different values before switching to Wi-Fi mode to prove reset/reprovision semantics:
+
+```bash
+cargo run -p lilbug-cli --bin lilbug -- \
+  --config-path /tmp/lilbug.json \
+  init \
+  --nickname anthony \
+  --bootstrap-url https://127.0.0.1:7443 \
+  --wifi-ssid lab-net-2 \
+  --wifi-password newerpass \
+  --api-key lb_second
+```
+
+This proves the bootstrap target now wipes and replaces its persisted config instead of rejecting the second init request.
 
 ### 4. Restart the emulator in Wi-Fi mode
 
@@ -89,6 +108,7 @@ Set config:
 
 ```bash
 cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config set --nickname anthony nickname bug-02
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json config set --nickname bug-02 wifi.ssid lab-net-3
 ```
 
 This also renames the local CLI record key from `anthony` to `bug-02`.
@@ -96,17 +116,40 @@ This also renames the local CLI record key from `anthony` to `bug-02`.
 Send commands:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony fwd:300
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony back:300
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony stop
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony brake
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname anthony face:happy
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 fwd:300
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+sleep 1
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 fwd:800
+sleep 0.1
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 back:300
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+sleep 1
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 fwd:800
+sleep 0.1
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 face:happy
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+sleep 1
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json state --nickname bug-02
+
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 stop
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json cmd --nickname bug-02 brake
 ```
+
+These command sequences prove:
+
+- timed motion expires automatically
+- a newer motion command replaces the older timed motion
+- `face:happy` does not cancel active motion
+- `stop` and `brake` only affect the motion lane
 
 Retrieve frame:
 
 ```bash
-cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json frame --nickname anthony --out /tmp/lilbug-frame.png
+cargo run -p lilbug-cli --bin lilbug -- --config-path /tmp/lilbug.json frame --nickname bug-02 --out /tmp/lilbug-frame.png
 file /tmp/lilbug-frame.png
 ```
 
@@ -117,7 +160,7 @@ Expected result:
 
 ### 6. Verify persistence after config mutation
 
-After `config set --nickname anthony nickname bug-02`, restart Wi-Fi mode again and re-run `state --nickname bug-02`.
+After the config mutations above, restart Wi-Fi mode again and re-run `state --nickname bug-02`.
 The returned config should still show `nickname: bug-02`, and the old nickname should no longer be the local lookup key.
 
 ## Manual Visual Checklist
@@ -148,6 +191,8 @@ Implemented now:
 - CLI config persistence in `~/.config/lilbug.json`
 - HTTPS emulator server with Bearer auth
 - emulator startup modes
+- bootstrap reprovision reset behavior
+- independent motion and face lanes with timed motion expiry
 - PNG frame retrieval
 
 Still planned later:
