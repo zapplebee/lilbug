@@ -1,6 +1,7 @@
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
@@ -152,8 +154,7 @@ impl IntoResponse for ResponseError {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
     let certs = load_or_create_certs(&args.storage_dir, &collect_certificate_subject_names(&args))?;
     let persisted = load_persisted_state(&args.storage_dir)?;
@@ -182,26 +183,54 @@ async fn main() -> Result<()> {
         .https_addr
         .parse()
         .with_context(|| format!("invalid --https-addr {}", args.https_addr))?;
-    let tls = RustlsConfig::from_pem(certs.cert_pem.into_bytes(), certs.key_pem.into_bytes())
-        .await
-        .context("failed to build rustls config")?;
+    ensure_addr_available(addr)?;
+    let handle = Handle::new();
+    let (startup_tx, startup_rx) = mpsc::sync_channel::<Result<()>>(1);
+    let server_state = app_state.clone();
+    let server_handle = handle.clone();
+    let cert_pem = certs.cert_pem.into_bytes();
+    let key_pem = certs.key_pem.into_bytes();
 
-    let server = tokio::spawn(run_server(addr, tls, app_state.clone()));
-    let ticker = tokio::spawn(run_runtime_tick(app_state.clone()));
+    let server_thread = thread::spawn(move || -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("failed to build tokio runtime")?;
+
+        runtime.block_on(async move {
+            let tls = RustlsConfig::from_pem(cert_pem, key_pem)
+                .await
+                .context("failed to build rustls config")?;
+            let _ = startup_tx.send(Ok(()));
+
+            let ticker = tokio::spawn(run_runtime_tick(server_state.clone()));
+            let server_result = run_server(addr, tls, server_handle, server_state).await;
+            ticker.abort();
+            let _ = ticker.await;
+            server_result
+        })
+    });
+
+    match startup_rx.recv() {
+        Ok(result) => result?,
+        Err(err) => {
+            return Err(anyhow!("failed to receive emulator server startup status: {err}"));
+        }
+    }
 
     let ui_result = if args.headless {
         run_headless(args.run_for_ms)
     } else {
-        let state = app_state.clone();
-        tokio::task::spawn_blocking(move || run_window(state, args.run_for_ms))
-            .await
-            .map_err(|err| anyhow!("window task failed: {err}"))?
+        run_window(app_state.clone(), args.run_for_ms)
     };
 
-    server.abort();
-    ticker.abort();
-    let _ = server.await;
-    let _ = ticker.await;
+    handle.graceful_shutdown(Some(Duration::from_secs(1)));
+    match server_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.context("emulator server thread failed")),
+        Err(_) => return Err(anyhow!("emulator server thread panicked")),
+    }
+
     ui_result
 }
 
@@ -215,7 +244,7 @@ async fn run_runtime_tick(state: AppState) -> Result<()> {
     }
 }
 
-async fn run_server(addr: SocketAddr, tls: RustlsConfig, state: AppState) -> Result<()> {
+async fn run_server(addr: SocketAddr, tls: RustlsConfig, handle: Handle, state: AppState) -> Result<()> {
     let app = Router::new()
         .route("/v1/init", post(init_device))
         .route("/v1/state", get(get_state))
@@ -225,6 +254,7 @@ async fn run_server(addr: SocketAddr, tls: RustlsConfig, state: AppState) -> Res
         .with_state(state);
 
     axum_server::bind_rustls(addr, tls)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .context("https server failed")
@@ -492,6 +522,13 @@ fn cert_path(storage_dir: &Path) -> PathBuf {
 
 fn key_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join("key.pem")
+}
+
+fn ensure_addr_available(addr: SocketAddr) -> Result<()> {
+    let listener = TcpListener::bind(addr)
+        .with_context(|| format!("failed to bind emulator HTTPS address {addr}"))?;
+    drop(listener);
+    Ok(())
 }
 
 fn default_base_url(https_addr: &str) -> String {

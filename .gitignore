@@ -1,4 +1,6 @@
 target/
 .DS_Store
+# Default local emulator state
+.lilbug-emulator/
 # Local scratch docs and notes for iteration
 .scratch/
